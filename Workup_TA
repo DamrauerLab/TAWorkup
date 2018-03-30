@@ -1,0 +1,786 @@
+% LOAD MULTIPLE TA SCANS AND AVERAGE THEM, PLOT SLICES, FIT, ETC.
+% Written by the Damrauer Lab (specifically DA, JDC, SGS, and RDD)
+% Last Modified by SGS, 2017-12-14 (see changelog at bottom)
+% Run entire file; follow on-screen prompts, choosing cancel to skip a part
+% of the code you don't want to run. Does fits and FFTs of residuals.
+
+LoadOpts = menu('Load New Data?',...
+    'Clear And Load',...
+    'Clear And Load, Using Chirp Correction From File',...
+    'Keep Loaded Data, Re-Do Chirp Correction',...
+    'Keep Loaded Data, But Re-Do Options',...
+    'Keep Everything, Just Re-Do Fits');
+if LoadOpts == 0
+    return
+elseif LoadOpts == 1 % if you're loading new data, clear stuff and set approx. path
+    clear all
+    LoadOpts = 1; % clear everything and tell program to load data
+    path = cd;
+elseif LoadOpts == 2
+    clear all
+    LoadOpts = 2; % clear everything and tell program to load data
+    path = cd;
+end
+
+%% HARDCODED DEFAULT OPTIONS (SUPERSEDED BY LATER PROMPTS)
+myfigs = findobj('type','figure'); % grab a list of figure numbers
+for ii = 1:length(myfigs)
+    fignums(ii) = myfigs(ii).Number;  % get each figure's number
+end
+try
+    Fn = max(fignums)+1; % find the biggest number and add 1; start here
+catch
+    Fn = 1; % if you can't find a figure, just start at #1
+end
+note = ''; % adds note to average and to plots
+TARange = [-0.22 0.7]; % TA signal range [min max]
+TUnits = 'ps'; % Time units (fs, ps, ns, \mus, ms, etc.)
+TMult = 0; % Multiplier for time axis (e.g. convert ps to fs)
+TLims = [-1 5]; % Axis limits for plotting times
+WLLims = [350 625]; % Axis limits for probe wavelengths
+KinWidth = 3; % Width in nm to average together when slicing out kinetics
+SpecWidth = 0; % neighboring spectra to average together when slicing spectra
+% NWLs = [400 520]; % Colors for normalizing spectral slices
+% NTimes = [-2 2]; % Times for normalizing kinetics
+
+%% LOAD ALL DATA, AVERAGE, SAVE AVERAGE
+cd(path) % go into the last used path (guessed or actual)
+if (LoadOpts == 1 || LoadOpts ==2)
+disp('Selecting Files To Analyze')
+TAType = menu('TA Type','Damrauer Ultrafast','ns TA',...
+    'Ultrafast Systems TA Data (e.g. Dukovic/NREL)');
+if TAType == 2
+    path = uigetdir('','Select directory with ns TA Data');
+else
+    [Files,path] = uigetfile('*','Select TA Data','Multiselect','on');
+    if not(iscell(Files))
+        Files = {Files};
+    end
+end
+cd(path) % cd into the new, selected path
+
+
+disp('Loading WL And Time Axes')
+if TAType == 1 % Quantronix
+    Dlm = '\t';
+    Times = dlmread(Files{1},Dlm,0,1); % Read Expt times from first file
+    Times = Times(1,:); % reorient times vector
+    nCols = length(Times);
+    CamWL = dlmread(Files{1},Dlm,1,0); % Read cam WLs from first file
+    CamWL = CamWL(:,1);
+    [row,~] = find(CamWL);
+    CamWL = CamWL(row);
+    nRows = length(CamWL);
+    Fstart = [1 1]; % corner to start reading the file
+elseif TAType == 2 % ns
+    Dlm = '\t';
+    Files = dir('*ged Data.dat'); %find the files
+    Times = dlmread(Files(1).name,Dlm)';
+    Times = Times(1,:);
+    WLStringStart = regexp(Files(1).name,'\d{3}nm_Av');
+    % iterate over all files
+    for ii=1:length(Files)
+        % Record the wavlength:
+        CamWL(ii,1) = str2num(Files(ii).name(WLStringStart+(0:2)));
+        % Read in the data:
+        Temp = dlmread(Files(ii).name,Dlm);
+        PumpOffset = mean(Temp(1:50,3))-mean(Temp(1:50,2));
+        AllScans(ii,:) = -log10(Temp(:,3)./(Temp(:,2)+PumpOffset));
+        if sum(abs(Times-Temp(:,1)'))>1e-12
+            disp('Not all times the same')
+            return
+        end        
+    end
+    note = Files(1).name(1:WLStringStart-2);
+    Files = {['All Data' note]};
+    dlmwrite(Files{1},[[0 Times];[CamWL AllScans]],...
+        'delimiter','\t','newline','pc');
+    nCols = length(Times);
+    nRows = length(CamWL);
+    Fstart = [1 1]; % corner to start reading the file
+    [row,~] = find(CamWL);
+    TUnits = 'ns';
+    TMult = 9;
+    KinWidth = 0; % Width in nm to average together when slicing out kinetics
+    SpecWidth = 5; % neighboring spectra to average together when slicing spectra
+elseif TAType == 3 % Ultrafast Systems
+    Dlm = ',';
+    endfound = 0; % prepare to search rows
+    nRows = inputdlg('Suggest # Rows','Enter #',1,{'400'})
+    nRows = str2double(nRows{1});
+    disp('Finding # Rows')
+    while endfound == 0 % until you've found the end
+        try
+            nRows = nRows+1; % prepare the next row
+            crapdata = dlmread(Files{1},Dlm,[0,0,nRows,1]);
+        catch
+            endfound = 1;
+            disp(['End Found, Rows = ' num2str(nRows)])
+            nRows = nRows-1; % go back to the last one that worked
+        end
+    end
+    endfound = 0; % prepare to search columns
+    nCols = inputdlg('Suggest # Cols','Enter #',1,{'400'})
+    nCols = str2double(nCols{1});
+    disp('Finding # Columns')
+    while endfound == 0
+        try
+            nCols = nCols+1; % try the next column
+            crapdata = dlmread(Files{1},Dlm,[0,0,1,nCols]);
+        catch
+            endfound = 1;
+            disp(['End Found, Columns = ' num2str(nCols)])
+            nCols = nCols-1; % go back to the last one that worked
+        end
+    end
+    Times = dlmread(Files{1},Dlm,[0,1,0,nCols]); % Read Expt times from first file
+    CamWL = dlmread(Files{1},Dlm,[1,0,nRows,0]); % Read cam WLs from 1st file
+    [row,~] = find(CamWL);
+    CamWL = CamWL(row);
+    Fstart = [1 1];
+end
+
+disp('Loading All TA Data')
+clear AllScans Temp
+for ii = 1:length(Files)
+    Temp = dlmread(Files{ii},Dlm,[Fstart(1) Fstart(2) nRows nCols]);
+    % Error = bad/incomplete scan
+    AllScans(:,:,ii) = Temp(row,:);
+end
+disp('Averaging TA Data')
+AvgTAData = nanmean(AllScans,3);
+
+% if you're loading new data, suggest defaults
+GenOptions = {note,...
+    [num2str(min(min(AvgTAData))) '  ' num2str(max(max(AvgTAData)))],...
+    TUnits,num2str(TMult),...
+    [num2str(min(Times)*10^TMult) '  ' num2str(max(Times)*10^TMult)],...
+    [num2str(min(CamWL)) '  ' num2str(max(CamWL))],...
+    num2str(KinWidth),...
+    num2str(SpecWidth)};
+end
+GenOptions = inputdlg({'Note (Appended To Saved Figure Filenames)',...
+    'TA Signal Range (min,max)',...
+    'Time Units (e.g. fs, ps, ns, \mus, ms, etc.)',...
+    'Time Scaling Factor (Multiplies Time Axis by 10^X)',...
+    'Time Range After Incorporating Scaling Factor (Space Separated)',...
+    'Bluest & Reddest Wavelength To Plot (Space Separated)',...
+    'Width (in nm) To Average Together When Making Kinetic Slices',...
+    '# Of Spectra On Either Side Of Chosen Times To Average Together for Spectral Slices (0 = No Averaging)'},...
+    'Cancel To Use Hardcoded Defaults',1,GenOptions);
+if not(isempty(GenOptions)) % if the user selected OK
+    if not(isempty(GenOptions{1}))
+        note = [', ' GenOptions{1}]; % adds note to average and to plots
+    end
+    TARange = str2num(GenOptions{2});
+    TUnits = GenOptions{3}; % Time units (fs, ps, ns, \mus, ms, etc.)
+    TMult = str2double(GenOptions{4}); % Multiplier for time axis (e.g. convert ps to fs)
+    TLims = str2num(GenOptions{5}); % Get time limits
+    WLLims = str2num(GenOptions{6}); % Get probe wavelength limits
+    KinWidth = str2double(GenOptions{7}); % Width in nm to average for kin slices
+    SpecWidth = str2double(GenOptions{8}); % neighboring spectra to average together when slicing spectra
+end
+Times = Times*10^TMult; % Scale times
+autoscale = isempty(GenOptions); % autoscale axes
+mkdir(['Workup' note]);
+cd(['Workup' note]);
+
+%% FIND AND AVERAGE DATA AT REPEATED TIMES
+if (LoadOpts == 1 || LoadOpts ==2)
+disp('Averaging Repeated Timepoints')
+[Times,sInd] = sort(Times); % Sort times, figure out indices
+AvgTAData = AvgTAData(:,sInd); % Sort TA data based on times
+[Times,UniqInds,~] = unique(Times); % find unique times, redefine times
+for ii = 1:length(UniqInds)-1
+    UniqTA(:,ii) = mean(AvgTAData(:,UniqInds(ii):UniqInds(ii+1)-1),2);
+end
+UniqTA(:,length(UniqInds)) = mean(AvgTAData(:,UniqInds(end):end),2);
+AvgTAData = UniqTA; % overwrite data with unique data
+disp('Saving Uncorrected Data')
+dlmwrite(['Average TA Data, Uncorr' note],[[0 Times];[CamWL AvgTAData]],'\t'); % save raw avg
+
+[~,t0Idx] = min(abs(Times)); % Find t0 from the list of unique times
+BGSubtr = inputdlg({'First Background Point (Choose Cancel To Skip)',...
+    ['Last Background Point (t0 Seems To Be Point #' num2str(t0Idx) ')']},...
+    'BG Subtraction',1,{'1',num2str(t0Idx-5)});
+if not(isempty(BGSubtr)) % If user didn't cancel BG subtraction
+    disp('Subtracting Background')
+    BGUsed = mean(AvgTAData(:,str2num(BGSubtr{1}):str2num(BGSubtr{2})),2)*ones(1,length(Times));
+    AvgTAData = AvgTAData-BGUsed;
+end
+end
+
+%% PLOT TA DATA (UNCORRECTED)
+if min(size(AvgTAData))>2 % do you have multiple WLs to chirp correct?
+    t0A = -1; % region, over which to look for chirp correction
+    t0B = 2;  % choose arbitrary limits; this doesn't really matter
+    if LoadOpts == 1 || LoadOpts == 3 % if starting fresh or re-doing chirp 
+        if TAType == 2
+            ChirpGuess = {'-50','50'};
+        else
+            ChirpGuess = {'-1','2'};
+        end
+        CCorr = inputdlg({'Chirp Polynomial Fit Order (Select Cancel To Skip Chirp Correction)',...
+            'Approx. Chirp Start (Select Cancel To Skip Chirp Correction)',...
+            'Approx. Chirp End (Select Cancel To Skip Chirp Correction)'},...
+            'Chirp Correct',1,{'3',ChirpGuess{1},ChirpGuess{2}});
+        t0A = str2num(CCorr{2});
+        t0B = str2num(CCorr{3});
+    elseif LoadOpts == 2 % if you're loading chirp correction from file
+        curdir = cd; % get the current directory
+        [t0FileName,t0PathName] = uigetfile('*','Select t0 Coefficients File'); % find t0 file
+        cd(t0PathName);
+        t0Coeffs = dlmread(t0FileName);
+        t0Curve = polyval(t0Coeffs,CamWL);
+        cd(curdir); % move back to original directory
+        CCorr = {'Loaded'}; % store chirp correction options
+        Truet0 = 0;
+    end
+    
+    % in any case, plot the data around t0
+    disp('Plotting Uncorrected Data Near t0')
+    figure(Fn), clf, set(gcf,'color','w')
+    surf(CamWL,Times,AvgTAData','Linestyle','none'),view(0,90),grid('off')
+    set(gca,'FontSize',24,'linewidth',2.5,'ticklength',[.0200 .025],'box','on','Layer','top','xminortick','off','yminortick','off')
+    caxis([TARange(1) TARange(2)])
+    h_cb = colorbar;
+    set(h_cb,'FontSize',24,'linewidth',2.5,'ticklength',.0200,'ytick',TARange(1):(TARange(2)-TARange(1))/5:TARange(2))
+    xlim([WLLims(1) WLLims(2)])
+    xlabel('Probe Wavelength /nm')
+    ylim([t0A t0B])
+    ylabel(['Time /' TUnits])
+    colormap('bluewhitered')
+    hold on
+    title('TA Data Near t_0')
+    if autoscale == 1
+        axis('auto')
+    end
+    
+    if isempty(CCorr) % if you're skipping (either because you hit cancel...
+        % or aren't doing chirp correction)
+        t0Curve = zeros(size(CamWL)); % tell program t0 is at 0
+        AverageTADataCCorr = AvgTAData; % make chirp corrected data = data
+        AdjTimes = Times; % don't shift times
+        Truet0 = 0;
+        dlmwrite(['Average TA Data, no ccorr' note],...
+            [[0 AdjTimes];[CamWL AverageTADataCCorr]],'delimiter','\t','newline','pc');
+    elseif LoadOpts == 1 || LoadOpts == 3 % launch a chirp correction window
+        title('TA Data Near t_0 - Click Along t_0 & Press Enter When Done')
+        disp('Chirp-Correcting: Click Along t0, Press Enter When Done')
+        [t0Colors,t0s] = ginput; % get some t0 points from the user
+        t0Coeffs = polyfit(t0Colors,t0s,str2num(CCorr{1}));
+        t0Curve = polyval(t0Coeffs,CamWL);
+        disp('Saving Chirp Function')
+        dlmwrite('t0 Lookup Table',[CamWL,t0Curve],'\t');
+        dlmwrite('t0 Coeffs (Descending Power)',t0Coeffs,'\t');
+    end
+    else % this is what happens if you can't chirp correct
+        CCorr = {};
+        t0Curve = zeros(size(CamWL)); % tell program t0 is at 0
+        AverageTADataCCorr = AvgTAData; % make chirp corrected data = data
+        AdjTimes = Times; % don't shift times
+        Truet0 = 0;
+        dlmwrite(['Average TA Data, no ccorr' note],...
+            [[0 AdjTimes];[CamWL AverageTADataCCorr]],'delimiter','\t','newline','pc');
+end
+
+
+if LoadOpts < 4 && not(isempty(CCorr)) % if you did anything chirp-correction related
+    figure(Fn)
+    plot3(CamWL,t0Curve,ones(length(CamWL),length(CamWL)),'linewidth',3,'color','k');
+    title('TA Data Near t_0 with Chirp Function')
+    set(gcf,'PaperPositionMode','auto')
+    print(['TA Plot Near t0',note],'-dpng','-r0')
+    
+    % USE t0 CURVE TO RE-INTERPOLATE DATA
+    disp('Performing Chirp Correction')
+    [Truet0,Truet0Ind] = min(t0Curve); % the WL slice with reference times
+    for ii = 1:length(CamWL)
+        TempTimes = Times-(t0Curve(ii)-t0Curve(Truet0Ind));
+        if sum(isnan(AvgTAData(ii,:)))>length(AvgTAData(ii,:))-4 % only interp if have >4 time points
+            AverageTADataCCorr(ii,:) = NaN(1,length(Times));
+        else
+            AverageTADataCCorr(ii,:) = interp1(TempTimes,AvgTAData(ii,:),Times,'pchip','extrap');
+        end
+    end
+    AdjTimes = Times-Truet0;
+    disp('Saving Corrected TA Data')
+    if isempty(BGSubtr)
+        dlmwrite(['Average TA Data, chirp corr' note],...
+            [[0 AdjTimes];[CamWL AverageTADataCCorr]],'delimiter','\t','newline','pc');
+    else
+        dlmwrite(['Average TA Data, bkg & chirp corr' note],...
+            [[0 AdjTimes];[CamWL AverageTADataCCorr]],'delimiter','\t','newline','pc');
+    end
+    
+end
+
+%% PLOT CORRECTED DATA NEAR T0
+if LoadOpts < 4 && min(size(AverageTADataCCorr))>1 % if you loaded new data & have a matrix
+disp('Plotting Corrected t0 Data')
+figure(Fn+1), clf, set(gcf,'color','w') % figure for the zoomed in TA data at t0
+surf(CamWL,AdjTimes,AverageTADataCCorr','Linestyle','none'),view(0,90),grid('off')
+set(gca,'FontSize',24,'linewidth',2.5,'ticklength',[.0200 .025],...
+    'box','on','Layer','top','xminortick','off','yminortick','off')
+caxis([TARange(1) TARange(2)])
+h_cb = colorbar;
+set(h_cb,'FontSize',24,'linewidth',2.5,'ticklength',.0200,...
+    'ytick',TARange(1):(TARange(2)-TARange(1))/5:TARange(2))
+xlim([WLLims(1) WLLims(2)])
+xlabel('Probe Wavelength /nm')
+ylim([t0A-Truet0 t0B-Truet0])
+ylabel(['Time /' TUnits])
+colormap('bluewhitered')
+hold on
+if autoscale == 1
+    axis('auto')
+end
+set(gcf,'PaperPositionMode','auto')
+if isempty(CCorr)
+    title('Uncorrected TA Data near t_0')
+    print(['TA Matrix Near t0, Uncorrected',note],'-dpng','-r0')
+elseif not(isempty(CCorr))
+    title('Corrected TA Data near t_0')
+    print(['TA Matrix Near t0, Chirp Corrected',note],'-dpng','-r0')
+end
+end
+
+%% PLOT FULL TA DATA
+if  min(size(AverageTADataCCorr))>1 % if you have an actual TA matrix
+figure(Fn+2), clf, set(gcf,'color','w') % Full, chirp-corrected TA matrix
+surf(CamWL,AdjTimes,AverageTADataCCorr','Linestyle','none'),view(0,90),grid('off')
+set(gca,'FontSize',24,'linewidth',2.5,'ticklength',[.0200 .025],'box','on','Layer','top','xminortick','off','yminortick','off')
+caxis([TARange(1) TARange(2)])
+h_cb = colorbar;
+set(h_cb,'FontSize',24,'linewidth',2.5,'ticklength',.0200,'ytick',TARange(1):(TARange(2)-TARange(1))/5:TARange(2))
+xlim([WLLims(1) WLLims(2)])
+xlabel('Probe Wavelength /nm')
+ylim([TLims(1) TLims(2)])
+ylabel(['Time /' TUnits])
+colormap('bluewhitered')
+hold on
+if autoscale == 1
+    axis('auto')
+end
+title('Full TA Data')
+set(gcf,'PaperPositionMode','auto')
+if isempty(CCorr)
+    print(['TA Matrix',note],'-dpng','-r0')
+elseif not(isempty(CCorr))
+    print(['TA Matrix, Chirp-Corrected',note],'-dpng','-r0')
+end
+end
+
+%% FIND INDICES FOR SLICES, THEN SLICE DATA AND PLOT SLICES
+if LoadOpts < 5 % If you're doing anything other than retrying fits
+    if ~exist('kincolopts') % prepare guesses for time/WL slices
+        kincolopts = {num2str(linspace(min(CamWL),max(CamWL),4),'%.0f ')};
+    end
+    if ~exist('stimopts') % prepare guesses for time/WL slices
+        stimopts = {num2str(linspace(min(AdjTimes),max(AdjTimes),4),'%.1f  ')};
+    end
+    
+    if  min(size(AverageTADataCCorr))>1 % if you have an actual matrix
+        figure(Fn+2)
+        title('Select Kinetic Trace Colors') % tell the user why they're looking at this plot
+        
+        kincolopts = inputdlg({'Enter Colors For Kinetic Slices Or Cancel To Use Ginput'},...
+            'Kinetic Slice WLs',1,kincolopts);
+        if isempty(kincolopts)
+            disp(['Click On Plot To Choose Kinetic Slice Colors' char(10) 'Press Enter When Done'])
+            [KineticsColors,~] = ginput;
+        else
+            KineticsColors = str2num(kincolopts{:});
+        end
+        if not(isempty(KineticsColors))
+            KineticsColors = sort(KineticsColors);
+            kincolopts = {num2str(KineticsColors(:)','%.0f ')};
+            clear KinSlices KinStr SpecSlices SpecStr
+            KinInd = interp1(CamWL,1:length(CamWL),KineticsColors,'nearest','extrap');
+            KinMinInd = interp1(CamWL,1:length(CamWL),KineticsColors-abs(KinWidth/2),'nearest','extrap');
+            KinMaxInd = interp1(CamWL,1:length(CamWL),KineticsColors+abs(KinWidth/2),'nearest','extrap');
+            for ii = 1:length(KineticsColors) % generate kinetic traces
+                KinSlices(:,ii) = mean(AverageTADataCCorr(KinMinInd(ii):KinMaxInd(ii),:),1)';
+                KinStr{ii} = num2str(CamWL(KinInd(ii)),'%0.0fnm Kinetics');
+            end
+        end
+        title('Full TA Data') % change plot title back
+        
+        title('Select Times To Grab Spectra') % tell the user why they're looking at this plot
+        stimopts = inputdlg({'Enter Times For Spectra Or Cancel To Use Ginput'},...
+            'Spectrum Times',1,stimopts);
+        if isempty(stimopts)
+            disp(['Click On Plot To Choose Spectral Slice Times' char(10) 'Press Enter When Done']);
+            [~,SpectrumTimes] = ginput;
+        else
+            SpectrumTimes = str2num(stimopts{:});
+        end
+        
+        SpectrumTimes = sort(SpectrumTimes);
+        stimopts = {num2str(SpectrumTimes(:)','%.1f  ')};
+        SpecInd = interp1(AdjTimes,1:length(AdjTimes),SpectrumTimes,'nearest','extrap');
+        SpecMinInd = SpecInd-abs(SpecWidth);
+        SpecMaxInd = SpecInd+abs(SpecWidth);
+        for ii = 1:length(SpectrumTimes) % generate spectra at chosen times
+            if SpecMinInd(ii)<1 % if start is out of bounds
+                SpecMinInd(ii) = 1; % use first point
+            end
+            if SpecMaxInd(ii)>length(AdjTimes) % if end is out of bounds
+                SpecMaxInd(ii) = length(AdjTimes); % use last point
+            end
+            SpecSlices(:,ii) = mean(AverageTADataCCorr(:,SpecMinInd(ii):SpecMaxInd(ii)),2);
+            SpecStr{ii} = [num2str(round(AdjTimes(SpecInd(ii)),3,'significant')) ' ' TUnits ' Spectrum'];
+        end
+        title('Full TA Data') % change plot title back
+    elseif length(CamWL)==1 % if you only have kinetics, grab it
+        KineticsColors = CamWL;
+        KinSlices(:,1) = AverageTADataCCorr;
+        KinStr{1} = num2str(CamWL,'%0.0fnm Kinetics');
+    elseif length(AdjTimes)==1 % if you only have spectra, grab it
+        SpectrumTimes = AdjTimes;
+        SpecSlices(:,1) = AverageTADataCCorr;
+        SpecStr{1} = [num2str(round(AdjTimes,3,'significant')) ' ' TUnits ' Spectrum'];
+    end
+    
+    % PLOT SLICES (KINETIC, THEN SPECTRA)
+    if not(isempty(KineticsColors)) && length(AdjTimes)~=1
+        figure(Fn+3),clf,set(gcf,'color','w') % Figure for kinetic slices
+        set(gca,'FontSize',20,'linewidth',2.5,'ticklength',[.0200 .025],'box','on',...
+            'ColorOrder',jet(length(KineticsColors))*.9)
+        hold on
+        axis([TLims(1) TLims(2) TARange(1) TARange(2)])
+        plot(AdjTimes,KinSlices,'linewidth',2)
+        xlabel(['Time /' TUnits],'FontSize',20),ylabel('TA Signal','FontSize',20)
+        legend(KinStr,'FontSize',20,'box','off','location','best')
+        if autoscale == 1
+            axis('auto')
+        end
+        title('Kinetic Traces')
+        set(gcf,'PaperPositionMode','auto')
+        
+        print(['Kinetic Traces',note],'-dpng','-r0')
+        savefig(['Kinetic Traces',note])
+        dlmwrite('Kinetic Traces.csv',[[NaN;AdjTimes(:)] [KineticsColors(:)';KinSlices]],...
+            'delimiter',',','newline','pc')
+    end
+    if length(CamWL)>1 && not(isempty(SpectrumTimes)) % if you actually have spectra
+        figure(Fn+4),clf,set(gcf,'color','w') % Figure for spectral slices
+        set(gca,'FontSize',20,'linewidth',2.5,'ticklength',[.0200 .025],'box','on',...
+            'ColorOrder',jet(length(SpectrumTimes))*.9)
+        hold on
+        axis([WLLims(1) WLLims(2) TARange(1) TARange(2)])
+        plot(CamWL,SpecSlices,'linewidth',2)
+        xlabel('Probe Wavelength /nm','FontSize',20),ylabel('TA Signal','FontSize',20)
+        legend([SpecStr],'FontSize',20,'box','off','location','best')
+        set(gcf,'PaperPositionMode','auto')
+        print(['Spectral Slices',note],'-dpng','-r0')
+        savefig(['Spectral Slices',note])
+        dlmwrite('Spectral Slices.csv',[[NaN;CamWL(:)] [SpectrumTimes(:)';SpecSlices]],...
+            'delimiter',',','newline','pc')
+    end
+end
+
+%% PLOT NORMALIZED SPECTRA AND KINETICS
+if LoadOpts < 5 % If you're doing anything other than just retrying fits
+    figure(Fn+3)
+    % tell the user why they're looking at this plot
+    title('Choose Kinetics Normalization Range (See Dialog Box)') 
+    normopts = inputdlg('Normalize Kinetics Based On What Time Range?',...
+        'Normalize Kinetics Based On What Time Range?',1,{'0   5'});
+    if ~isempty(normopts)
+        NTimes = str2num(normopts{:});
+        [~,NInd(3)] = min(abs(AdjTimes-NTimes(1))); % find their indices
+        [~,NInd(4)] = min(abs(AdjTimes-NTimes(2))); % find their indices
+        title('Kinetic Traces')
+        
+	if not(isempty(KineticsColors)) && length(AdjTimes)~=1 % do you have slices?
+        figure(Fn+5),clf,set(gcf,'color','w') % Figure for kinetic slices
+        set(gca,'FontSize',20,'linewidth',2.5,'ticklength',[.0200 .025],'box','on',...
+            'ColorOrder',jet(length(KineticsColors))*.9)
+        hold on
+        xlim([TLims(1) TLims(2)])
+        ylim([-1.5 1.5])
+        for ii = 1:length(KineticsColors)
+            plot(AdjTimes,KinSlices(:,ii)./max(abs(KinSlices(NInd(3):NInd(4),ii))),'linewidth',2)
+        end
+        xlabel(['Time /' TUnits],'FontSize',20),ylabel('Normalized TA Signal','FontSize',20)
+        legend(KinStr,'FontSize',20,'box','off','location','best')
+        if autoscale == 1
+            axis('auto')
+        end
+        title('Normalized Kinetic Traces')
+        set(gcf,'PaperPositionMode','auto')
+        print(['Kinetic Traces (Normalized)',note],'-dpng','-r0')
+        savefig(['Kinetic Traces (Normalized)',note])
+	end % if have slices
+    else
+        title('Kinetic Traces')
+        disp('Skipping Kinetic Trace Normalization')
+    end
+    
+    if length(CamWL)>1 && not(isempty(SpectrumTimes)) % if you have spectra
+        figure(Fn+4)
+        title('Choose Spectral Normalization Range (Click on Bounds)')
+        disp(['Select Wavelength Bounds On Spectral Data' char(10)...
+            'Region Will Be Used For Normalization']);
+        [NWLs,~,click] = ginput(2); % get the wavelengths
+    if length(NWLs)==2 && click(1)==1 && click(2)==1
+        [~,NInd(1)] = min(abs(CamWL-min(NWLs))); % find their indices
+        [~,NInd(2)] = min(abs(CamWL-max(NWLs))); % find their indices
+        title('Spectral Slices')
+        figure(Fn+6),clf,set(gcf,'color','w') % Figure for spectral slices
+        set(gca,'FontSize',20,'linewidth',2.5,'ticklength',[.0200 .025],'box','on',...
+            'ColorOrder',jet(length(SpectrumTimes))*.8)
+        hold on
+        xlim([WLLims(1) WLLims(2)])
+        ylim([-1.5 1.5])
+        for ii = 1:length(SpectrumTimes)
+            plot(CamWL,SpecSlices(:,ii)./max(abs(SpecSlices(NInd(1):NInd(2),ii))),'linewidth',2)
+        end
+        xlabel('Probe Wavelength /nm','FontSize',20),ylabel('Normalized TA Signal','FontSize',20)
+        legend(SpecStr(1:length(SpectrumTimes)),'FontSize',20,'box','off','location','best')
+        title('Normalized Spectral Slices')
+        set(gcf,'PaperPositionMode','auto')
+        print(['Spectral Slices (Normalized)',note],'-dpng','-r0')
+        savefig(['Spectral Slices (Normalized)',note])
+    else
+        title('Spectral Slices')
+        disp('Skipping Spectral Slice Normalization')
+    end
+    end
+end
+
+%% CFtool - Manual
+FitInputs = inputdlg({...
+	'First Time To Load Into Fitting',...
+	'Last Time To Load Into Fitting'},...
+    'Fit Options (Cancel To Skip)',[1 50],{'-2',num2str(max(AdjTimes))});
+if isempty(FitInputs)
+    disp('Skipping Fitting')
+    disp('Done')
+    return
+else
+TryNewFit = 1;
+time1 = str2num(FitInputs{1}); % first time to load into fitting
+time2 = str2num(FitInputs{2}); % last time to load into fitting
+
+[~,FitStart] = min(abs(time1-AdjTimes));
+[~,FitEnd] = min(abs(time2-AdjTimes));
+
+while TryNewFit == 1
+WhichSlice = menu('Choose Slice',KinStr);
+TimesForFit = AdjTimes(FitStart:FitEnd)'; % times for the residual
+disp(['Loading CFTool With ' KinStr{WhichSlice}])
+cftool(TimesForFit,KinSlices(FitStart:FitEnd,WhichSlice))
+disp(['Suggested Fit Function' char(10) 'ExpModGauss(x,sigma,t0,y0,A1,tau1,A2,tau2)'])
+
+IsFitDone = menu(['See command window for suggested fit function.' char(10)...
+        'When done with CFTool, copy your fit function,' char(10)...
+        'then export your fit to the workspace via:' char(10) char(10)...
+        'Fit -> Save To Workspace' char(10) char(10)...
+        'You must export your fit as "fittedmodel"' char(10)],...
+        'I have copied my function & exported my fit as "fittedmodel"',...
+        'Show me the list of slices again - I want to try another',...
+        'I''m done fitting; just end the program.');
+    if IsFitDone == 2
+        TryNewFit = 1;
+        disp('Trying a new color')
+    elseif IsFitDone == 1
+        TryNewFit = 0;
+        disp('Done with manual fitting')
+    elseif IsFitDone == 3
+        disp('Done')
+        return
+    end
+end
+if isempty(fittedmodel)
+    disp('Fitting Error, Ending Program')
+    return
+end
+KinFitFunc = inputdlg({['Enter Your Fit Function Below '...
+    '(Copy and Paste Your Custom Equation From CFTool)' char(10)]},...
+    'Fit Details',[1 50],...
+    {'ExpModGauss(x,sigma,t0,y0,A1,tau1,A2,tau2)','x'});
+end
+%% FIT AND PLOT FITS TO SLICED KINETICS
+if ~exist('DoFitting') % initial guesses when loading new data
+    DoFitting{1} = num2str(min(AdjTimes));
+    DoFitting{2} = num2str(max(AdjTimes));
+end
+
+figure(Fn+6) % show user plots of kinetic slices
+
+DoFitting = inputdlg({'First Time To Include For All Fits (After Shift)',...
+    'Last Time To Include For All Fits (After Shift)'},'Fit All Slices? (Cancel To Skip)',...
+    [1 60],DoFitting);
+
+if ~isempty(DoFitting) % if user chose to do fitting
+    [~,FitStart] = min(abs(str2num(DoFitting{1})-AdjTimes));
+    [~,FitEnd] = min(abs(str2num(DoFitting{2})-AdjTimes));
+    TimesForFit = AdjTimes(FitStart:FitEnd)';
+
+    clear KinFitType KinFitOpts
+    KinFitType = fittype(KinFitFunc{1},'independent',indepnames(fittedmodel));
+    KinFitOpts = fitoptions(KinFitType); % create a fit options object
+    KinFitOpts.MaxFunEvals = 10000; % specify various options
+    KinFitOpts.MaxIter = 10000;
+    KinFitOpts.StartPoint = coeffvalues(fittedmodel); % guesses
+    KinFitOpts.Upper = Inf*ones(size(coeffvalues(fittedmodel))); % upper lims
+    KinFitOpts.Lower = -Inf*ones(size(coeffvalues(fittedmodel))); % lower lims
+
+    % Prepare figure for fits
+    figure(Fn+7),clf,set(gcf,'color','w')
+    PlotColors = jet(length(KineticsColors));
+    FigDim = get(gcf,'position'); % Check resolution of figure
+    if FigDim(3)<FigDim(4)
+        Dim1 = ceil(sqrt(length(KineticsColors)));
+        Dim2 = ceil(length(KineticsColors)/ceil(sqrt(length(KineticsColors))));
+    else
+        Dim2 = ceil(sqrt(length(KineticsColors)));
+        Dim1 = ceil(length(KineticsColors)/ceil(sqrt(length(KineticsColors))));
+    end
+    
+    % Perform and plot fits
+    delete('Fit Results.txt')
+    for ii = 1:length(KineticsColors)
+        KinFit{ii} = fit(TimesForFit,KinSlices(FitStart:FitEnd,ii),...
+            KinFitType,KinFitOpts); % Do the actual fitting
+        Residual{ii} = KinSlices(FitStart:FitEnd,ii)-KinFit{ii}(TimesForFit);
+        
+        diary('Fit Results.txt')
+        diary on
+        disp(['Fit to ' KinStr{ii} ':']) % display fit WL
+        KinFit{ii} % display fit results
+        disp([char(10) char(10)])
+        diary off
+        subplot(Dim1,Dim2,ii)
+%         set(gca,'FontSize',20,'linewidth',2.5,'ticklength',[.0200 .025],'box','on')
+        hold on
+        plot(AdjTimes',KinSlices(:,ii),'color',PlotColors(ii,:),'linewidth',2);
+        plot(AdjTimes(FitStart:FitEnd)',KinFit{ii}(TimesForFit),'color','k',...
+            'linewidth',2,'linestyle','--')
+        axis('tight')
+        title(KinStr{ii},'fontsize',14)
+        xlabel(['Time /' TUnits],'FontSize',20),ylabel('\DeltaA /OD','FontSize',20)
+    end
+    set(gcf,'PaperPositionMode','auto')
+    print(['Kinetic Traces (Fitted)',note],'-dpng','-r0')
+    savefig(['Kinetic Traces (Fitted)',note])
+end % fitting chosen to do check
+
+%% Plot Residual and FFT
+WhatRes = 1; % initialize residual choice with a valid number
+while WhatRes ~=0
+    WhatRes = menu(['Choose Wavelength For' char(10) ...
+        'Doing FFT Of Residual' char(10) char(10)...
+        'Close Window To Exit'],KinStr);
+    if WhatRes ~=0 % if doing FFT
+
+    figure(Fn+7+WhatRes),clf,set(gcf,'color','w')
+    hold on
+    subplot(2,1,1)
+    hold on
+    plot(TimesForFit,Residual{WhatRes},'linewidth',2)
+    plot(TimesForFit,zeros(length(Times(FitStart:FitEnd)),1),'k')
+    xlim([TimesForFit(1),TimesForFit(end)])
+	title('Residual - Click On Start And End Times For FFT')
+        
+    [ResBnds,~] = ginput(2); % get limits 
+    [~,ResSt] = min(abs(TimesForFit-ResBnds(1)));
+    [~,ResEnd] = min(abs(TimesForFit-ResBnds(2)));
+    
+    plot([TimesForFit(ResSt) TimesForFit(ResSt)],...
+        [-max(abs(Residual{WhatRes})) max(abs(Residual{WhatRes}))],'color','g')
+    plot([TimesForFit(ResEnd) TimesForFit(ResEnd)],...
+        [-max(abs(Residual{WhatRes})) max(abs(Residual{WhatRes}))],'color','g')
+    
+    title(['Residual Of Fitted ' KinStr{WhatRes}])
+    
+    disp(['Computing FFT of residual from ' KinStr{WhatRes}])
+    Nfft = 2^ceil(log2(length(Residual{WhatRes}(ResSt:ResEnd))));
+    freqs = linspace(0,0.5/(TimesForFit(2)-TimesForFit(1)),Nfft/2)./0.0299792458;
+    fftresidual = abs(fft(Residual{WhatRes}(ResSt:ResEnd),Nfft));
+    fftresidual = fftresidual./max(fftresidual);
+    fftfit = fit(freqs',fftresidual(1:Nfft/2),'gauss3');
+    Peaks = coeffvalues(fftfit);
+    for ii = 1:length(Peaks)/3
+        fftpeaks(ii) = Peaks(3*ii-1);
+    end
+    
+    subplot(2,1,2)
+    hold on
+    xlim([0 600])
+    
+    plot(freqs,fftresidual(1:Nfft/2),'linewidth',2)
+    plot(freqs,fftfit(freqs))
+    xlabel('Frequency /cm^-^1')
+    title(['FFT of Residual (' num2str(fftpeaks,'%0.0f cm^-^1 ') ')'])
+    set(gcf,'PaperPositionMode','auto')
+    print(['TA Residual and FFT',note],'-dpng','-r0')
+end
+end
+
+%%
+cd .. % go back to the data directory after finishing everything
+disp('Finished')
+disp('  ')
+
+%% Changelog
+%{
+2017-12-14 Fixed the surface plot around t0 when loading chirped correction
+from file. Now the data is plotted along with the loaded chirp function.
+
+2017-02-08 Now nanosecond data workup works just like the Clark/Quantronix.
+SGS.
+
+2017-02-02 Messed with normalization options (you can now more easily skip
+making those unnecessary figures. JDC.
+
+2016-10-06 Updated to save background corrected file even when no chirp
+    correction was performed. JDC.
+
+2016-09-23 Fixed loading of Ultrafast Systems TA data to scan through file
+    until it hits an error to get nRows and nColumns
+
+2016-09-09 Further refinement to loading ns TA data. SGS
+
+2016-09-08 Changed how DoFitting is defined so that it will never be
+    undefined. Previously you could crash the program by trying to redo a
+    fit that didn't exist. Also, LoadOpts = 2 now works properly. SGS
+
+2016-08-29 Now workup ns data in Workup_TA! SGS
+
+2016-08-16 Added return if LoadOpts is cancelled at beginning.
+    Updated figure numbering to stop overwriting figures (now just uses a
+    new number on each run.
+
+2016-07-26 updated fitting to be better skippable.
+
+2016-07-14b 
+
+2016-07-14 Added the ability to do multiple manual fits before settling on
+one
+
+2016-07-07b Rearranged fitting and switched to using convoluted
+exponentials with guesses from cftool fit. Updated residual selection to
+use a menu that's more user friendly.
+
+2016-07-06 Added cftool fitting and updated residual calculation to match
+
+2016-07-05 Adjusted notes to people, rearranged averaging and saving,
+changed filenames to more accurately reflect what the files contain.
+
+2016-07-04 Changed colormap to bluewhitered for 2D plots
+
+2016-06-14 Changed WL selection for slicing
+
+2016-06-08 Changed note to automatically add ', ' before itself if note
+exists
+
+2016-06-03 Finished ability to do ccorr from t0 coeffs file
+
+2016-06-01 Added saving of sliced kinetics and spectra
+
+2016-06-01 Added saving of raw .fig files for kinetics and spectra, Renamed
+load options to LoadOpts
+%}
